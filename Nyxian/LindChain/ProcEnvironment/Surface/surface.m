@@ -303,7 +303,7 @@ static inline void ksurface_kinit_kproc(void)
 void ksurface_kinit(void)
 {
     /* starting huh :3 (shall only run once) */
-    klog_log("ksurface:kinit", "extending paws onto XNU, rawr! with chuu XNU, I love XNU, Wont harm chu, but pls help mee >~<");
+    klog_log("ksurface:kinit", "I love XNU >~<");
     klog_log("ksurface:kinit", "");
     klog_log("ksurface:kinit", "   |\\__/,|   (`\\");
     klog_log("ksurface:kinit", " _.|o o  |_   ) )");
@@ -331,20 +331,15 @@ void ksurface_kinit(void)
         ksurface_panic("keychain didn't initialize");
     }
     
-    /* put logs where they actually belong to */
-    NSString *kfd_path = [NSString stringWithFormat:@"%@/Documents/mntfs/devfs/klog", NSHomeDirectory()];
-    NSString *entry_path = [NSString stringWithFormat:@"%@/Documents/klog.txt", NSHomeDirectory()];
+    /* put log devices where they actually belong to */
+    NSString *kfd_path = [NSString stringWithFormat:@"%@/Documents/mntfs/devfs/kmsg", NSHomeDirectory()];
+    NSString *kfd_path_old = [NSString stringWithFormat:@"%@/Documents/mntfs/devfs/kmsg_old", NSHomeDirectory()];
+    NSString *entry_path = [NSString stringWithFormat:@"%@/Documents/kmsg.txt", NSHomeDirectory()];
+    NSString *entry_old_path = [NSString stringWithFormat:@"%@/Documents/kmsg_old.txt", NSHomeDirectory()];
     
     /* now mapping klog to its dev device position */
-    if([[NSFileManager defaultManager] fileExistsAtPath:kfd_path])
-    {
-        NSString *kfd_path_old = [NSString stringWithFormat:@"%@/Documents/mntfs/devfs/klog_old", NSHomeDirectory()];
-        unlink([kfd_path_old UTF8String]);
-        rename([kfd_path UTF8String], [kfd_path_old UTF8String]);
-    }
-    
-    if(rename([entry_path UTF8String], [kfd_path UTF8String]) != 0)
-    {
-        perror("rename");
-    }
+    unlink([kfd_path UTF8String]);
+    unlink([kfd_path_old UTF8String]);
+    rename([entry_path UTF8String], [kfd_path UTF8String]);
+    rename([entry_old_path UTF8String], [kfd_path_old UTF8String]);
 }

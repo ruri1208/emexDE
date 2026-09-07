@@ -19,13 +19,9 @@
  along with Nyxian. If not, see <https://www.gnu.org/licenses/>.
 */
 
-#import <Foundation/Foundation.h>
-#import <LindChain/Utils/Utils.h>
-#import <CoreCompiler/CCUtils.h>
+#ifndef PEMACHOUTILS_H
+#define PEMACHOUTILS_H
 
-int LDEGetUserSetThreadCount(void)
-{
-    NSNumber *value = [[NSUserDefaults standardUserDefaults] objectForKey:@"cputhreads"];
-    int userSelected = (value && [value isKindOfClass:[NSNumber class]]) ? value.intValue : (int)CCGetMaximumPerformanceCores();
-    return (userSelected == 0) ? 1 : userSelected;
-}
+void *PEGetMachOEntryPointOfHeader(void *handle);
+
+#endif /* PEMACHOUTILS_H */

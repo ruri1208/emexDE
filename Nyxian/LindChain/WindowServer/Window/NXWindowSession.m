@@ -98,14 +98,19 @@
     }
 }
 
-- (void)beginInteractiveResize
+- (void)windowBeganResizing
 {
-    
+    return;
 }
 
-- (void)commitInteractiveResize
+- (void)windowEndedResizing
 {
-    
+    return;
+}
+
+- (void)windowDidMove
+{
+    return;
 }
 
 @end
