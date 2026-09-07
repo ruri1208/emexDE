@@ -36,6 +36,13 @@ enum {
     /* for the dlopen with the lock bypasses */
     kDyldLockUnlockFunc,
     
+    /* dyld hook ptrs */
+    kDyldGDyldPtr,
+    
+    kDyldNSGetExecutablePathVTFN,
+    kDyldProgramSDKAtLeastVTFN,
+    kDyldGetProgramSDKVersionVTFN,
+    
     kDyldPtrCount,
 };
 

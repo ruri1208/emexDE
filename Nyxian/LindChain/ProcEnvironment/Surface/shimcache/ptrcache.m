@@ -25,6 +25,7 @@
 #import <LindChain/ProcEnvironment/Utils/klog.h>
 #import <LindChain/ProcEnvironment/litehook/litehook.h>
 #import <LindChain/ProcEnvironment/LiveContainer/LCMachOUtils.h>
+#import <LindChain/ProcEnvironment/LiveContainer/utils.h>
 #include <string.h>
 #include <mach/mach.h>
 #include <mach/task_info.h>
@@ -32,6 +33,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <dlfcn.h>
 #import <Foundation/Foundation.h>
 
 typedef struct {
@@ -125,7 +127,7 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
         return KERN_FAILURE;
     }
     
-    dyld_search_entry_t entries[kDyldPtrCount] = {
+    static dyld_search_entry_t entries[kDyldPtrCount] = {
         /* first shit */
         [kDyldPtrOpen] = {
             .signature = 0xD4001001D28000B0ULL,
@@ -148,11 +150,7 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
             .found = NULL,
         },
         
-        /* 2nd shit */
-        [kDyldLockUnlockFunc] = {
-            .signature = 0x0,
-            .found = NULL,
-        },
+        /* rest is null by default */
     };
     searchDyldFunctions(dyldBase, entries, kDyldPtrOpenat + 1);
     
@@ -179,13 +177,123 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
     
     entries[kDyldLockUnlockFunc].found = lockUnlockPtr;
     
+    /* now stuffing the hook data */
+    typedef struct {
+        const char *name;
+        uint32_t adrpOffset;
+    } dyld_hook_segment_t;
+    
+    static const dyld_hook_segment_t dyldNames[3] = {
+        {
+            .name = "_NSGetExecutablePath",
+            .adrpOffset = 2,
+        },
+        {
+            .name = "dyld_program_sdk_at_least",
+            .adrpOffset = 1,
+        },
+        {
+            .name = "dyld_get_program_sdk_version",
+            .adrpOffset = 0,
+        }
+    };
+    
+    int offset = kDyldGDyldPtr;
+    for(size_t i = 0; i < 3; i++)
+    {
+        uint32_t* baseAddr = dlsym(RTLD_DEFAULT, dyldNames[i].name);
+        if(baseAddr == NULL)
+        {
+            break;
+        }
+        
+        uint32_t* adrpInstPtr = baseAddr + dyldNames[i].adrpOffset;
+        
+        // find the following instruction pattern: 1 adrp + 2 ldr
+        // adrp    x8, 0x1e6cf0000
+        // ldr     x0, [x8, #0x30]  {dyld4::gAPIs}
+        // ldr     x16, [x0]
+        
+        static long adrpExtraOffset = -1;
+        if(adrpExtraOffset == -1)
+        {
+            // let't hope the function is not longer than 200 instructions
+            uint32_t* end = baseAddr + 200;
+            for(uint32_t* cur = adrpInstPtr;cur < end;++cur)
+            {
+                if((*cur & 0x9f000000) != 0x90000000)
+                {
+                    continue;
+                }
+                if((*(cur+1) & 0xFFC00000) != 0xF9400000)
+                {
+                    continue;
+                }
+                if((*(cur+2) & 0xFFC00000) != 0xF9400000)
+                {
+                    continue;
+                }
+                adrpExtraOffset = cur - adrpInstPtr;
+                break;
+            }
+            assert(adrpExtraOffset != -1);
+        }
+        
+        adrpInstPtr += adrpExtraOffset;
+        entries[offset + 2].found = adrpInstPtr;
+        
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            entries[kDyldGDyldPtr].found = (void*)aarch64_emulate_adrp_ldr(*adrpInstPtr, *(adrpInstPtr + 1), (uint64_t)adrpInstPtr);
+        });
+        
+        assert(entries[kDyldGDyldPtr].found != 0);
+        assert(*(void**)entries[kDyldGDyldPtr].found != 0);
+        void* vtablePtr = **(void***)entries[kDyldGDyldPtr].found;
+        
+        void* vtableFunctionPtr = 0;
+        uint32_t* movInstPtr = adrpInstPtr + 6;
+
+        if((*movInstPtr & 0x7F800000) == 0x52800000)
+        {
+            // arm64e, mov imm + add + ldr
+            uint32_t imm16 = (*movInstPtr & 0x1FFFE0) >> 5;
+            vtableFunctionPtr = vtablePtr + imm16;
+        }
+        else if ((*movInstPtr & 0xFFE00C00) == 0xF8400C00)
+        {
+            // arm64e, ldr immediate Pre-index 64bit
+            uint32_t imm9 = (*movInstPtr & 0x1FF000) >> 12;
+            vtableFunctionPtr = vtablePtr + imm9;
+        }
+        else
+        {
+            // arm64
+            uint32_t* ldrInstPtr2 = adrpInstPtr + 3;
+            assert((*ldrInstPtr2 & 0xBFC00000) == 0xB9400000);
+            uint32_t size2 = (*ldrInstPtr2 & 0xC0000000) >> 30;
+            uint32_t imm12_2 = (*ldrInstPtr2 & 0x3FFC00) >> 10;
+            vtableFunctionPtr = vtablePtr + (imm12_2 << size2);
+        }
+        
+        entries[kDyldNSGetExecutablePathVTFN + i].found = vtableFunctionPtr;
+        
+        offset += 2;
+    }
+    
     static const char *names[kDyldPtrCount] = {
-        "open",
-        "fcntl",
-        "fstat64",
-        "stat64",
-        "openat",
-        "lockUnlockFunc",
+        "dyld.open",
+        "dyld.fcntl",
+        "dyld.fstat64",
+        "dyld.stat64",
+        "dyld.openat",
+        "dyld.lockUnlockFunc",
+        
+        "dyld.gptr",
+        
+        "_NSGetExecutablePath.vtable.fn",
+        "dyld_program_sdk_at_least.vtable.fn",
+        "dyld_get_program_sdk_version.vtable.fn",
     };
     
     for(size_t i = 0; i < kDyldPtrCount; i++)
@@ -197,7 +305,7 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
         }
         
         out[i] = (uint64_t)(uintptr_t)entries[i].found;
-        klog_log("ptrcache:emit", "%s = 0x%llx", names[i], (unsigned long long)out[i]);
+        klog_log("ptrcache:emit", "%s @ %p", names[i], (void*)out[i]);
     }
     
     return KERN_SUCCESS;
@@ -225,7 +333,6 @@ kern_return_t ksurface_ptrcache_emit(void)
         klog_log("ptrcache:emit", "couldn't write dyld.ptrs: %@", error);
         return KERN_FAILURE;
     }
-    klog_log("ptrcache:emit", "wrote %lu-byte pointer blob to %@", (unsigned long)data.length, url.path);
     
     return KERN_SUCCESS;
 }

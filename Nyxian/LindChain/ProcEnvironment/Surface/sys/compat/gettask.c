@@ -53,6 +53,7 @@ DEFINE_SYSCALL_HANDLER(gettask)
         if(errno != ESRCH &&    /* making sure we can see the target */
            entitlement_got_entitlement(proc_getentitlements(sys_proc_snapshot_), kPEEntitlementFlagSystemTaskPorts | kPEEntitlementFlagTaskForPid | kPEEntitlementFlagPlatform))
         {
+            sys_set_errno(0);
             goto skip_bsd_primitive_semantic_check;
         }
         
@@ -79,10 +80,7 @@ skip_bsd_primitive_semantic_check:
             sys_return_failure_with_errno(ENOMEM);
         }
         
-        /* set task port to be send */
-        (*out_ports)[0] = exportTask;
-        *out_ports_cnt = 1;
-        
+        sys_export_port(exportTask);    /* set task port send right to be send */
         sys_return;
     }
 }

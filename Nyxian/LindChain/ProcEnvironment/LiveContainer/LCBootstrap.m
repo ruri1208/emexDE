@@ -23,6 +23,7 @@
 #import <LindChain/Private/FoundationPrivate.h>
 #import <LindChain/ProcEnvironment/LiveContainer/LCMachOUtils.h>
 #import <LindChain/ProcEnvironment/LiveContainer/utils.h>
+#import <LindChain/ProcEnvironment/LiveContainer/Tweaks/DyldHook.h>
 
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
@@ -45,6 +46,8 @@
 #import <LiveShim/LiveShimSyscall.h>
 #include <ksurface_config.h>
 #include <ksurface_abi.h>
+
+#import <LindChain/ProcEnvironment/Utils/PEMachOUtils.h>
 
 int hook__NSGetExecutablePath_overwriteExecPath(char*** dyldApiInstancePtr, char* newPath, uint32_t* bufsize)
 {
@@ -85,36 +88,15 @@ int hook__NSGetExecutablePath_overwriteExecPath(char*** dyldApiInstancePtr, char
 
 void LCOverwriteExecutablePath(NSString *executablePath)
 {
-    /* literally swapping CFBundle CFRuntime instances */
-    CFBundleRef currentMainCFBundle = CFBundleGetMainBundle();
-    assert(currentMainCFBundle != NULL);
-    CFAllocatorRef allocator = CFGetAllocator(currentMainCFBundle); /* doesnt matter if zero */
-    CFURLRef urlRef = CFURLCreateWithFileSystemPath(allocator, (__bridge CFStringRef)[executablePath stringByDeletingLastPathComponent], kCFURLPOSIXPathStyle, true);
-    assert(urlRef != NULL);
-    CFBundleRef guestMainCFBundle = CFBundleCreate(allocator, urlRef);
-    CFRelease(urlRef);  /* took a reference of it most probably */
-    assert(guestMainCFBundle != NULL);
-    
-    /*
-     * Swaps both bundles simply, not leaking any memory
-     * as both internal states are stable by CFRuntime it
-     * self we can safely exploit that angle to swap both
-     * and release the original bundle. To my knowledge
-     * CFBundle also doesn't cary any extra inline
-     * buffers but relies on other CF types.
-     */
-    assert(CFSwap(currentMainCFBundle, guestMainCFBundle));
-    CFRelease(guestMainCFBundle);                   /* destroys the real bundle, sounds like swizzling x3 */
-    
     /*
      * dyld4 stores executable path in a different place (iOS 15.0 +)
      * https://github.com/apple-oss-distributions/dyld/blob/ce1cc2088ef390df1c48a1648075bbd51c5bbc6a/dyld/DyldAPIs.cpp#L802
      */
     int (*orig__NSGetExecutablePath)(void* dyldPtr, char* buf, uint32_t* bufsize);
-    performHookDyldApi("_NSGetExecutablePath", 2, (void**)&orig__NSGetExecutablePath, hook__NSGetExecutablePath_overwriteExecPath);
+    performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, (void**)&orig__NSGetExecutablePath, hook__NSGetExecutablePath_overwriteExecPath);
     _NSGetExecutablePath((char*)[executablePath UTF8String], NULL);
     /* put the original function back */
-    performHookDyldApi("_NSGetExecutablePath", 2, nil, orig__NSGetExecutablePath);
+    performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, nil, orig__NSGetExecutablePath);
         
     /* overwriting remaining upper systems */
     NSString *procName = [executablePath lastPathComponent];
@@ -130,48 +112,6 @@ void LCOverwriteExecutablePath(NSString *executablePath)
     }
 }
 
-static void *LCGetMachOEntryPoint(void *handle)
-{
-    const struct mach_header_64 *header = (const struct mach_header_64 *)getGuestAppHeader();
-    const struct load_command *cmd = (const struct load_command *) ((uintptr_t)header + sizeof(struct mach_header_64));
-
-    for(uint32_t i = 0; i < header->ncmds; i++)
-    {
-        if(__builtin_expect(cmd->cmd == LC_MAIN, 0))
-        {
-            const struct entry_point_command *ec = (const struct entry_point_command *)cmd;
-            assert(ec->entryoff > 0);
-            return (void *)((uintptr_t)header + ec->entryoff);
-        }
-        cmd = (const struct load_command *)((uintptr_t)cmd + cmd->cmdsize);
-    }
-
-    return NULL;
-}
-
-static void LCInsertLibrariesIfNeeded(void)
-{
-    const char *librariesToInsert = getenv("DYLD_INSERT_LIBRARIES");
-    if(librariesToInsert == NULL)
-    {
-        return;
-    }
-    
-    NSString *nsLibrariesToInsert = [NSString stringWithCString:librariesToInsert encoding:NSUTF8StringEncoding];
-    NSArray<NSString*> *librariesToInsertArray = [nsLibrariesToInsert componentsSeparatedByString:@":"];
-    
-    for(NSString *library in librariesToInsertArray)
-    {
-        void *handle = dlopen([library UTF8String], RTLD_GLOBAL | RTLD_NOW);
-        if(handle == NULL)
-        {
-            const char *error = dlerror();
-            fprintf(stderr, "%s\n", error);
-            exit(1);
-        }
-    }
-}
-
 int LCBootstrapMain(NSString *executablePath,
                     int argc,
                     char *argv[])
@@ -181,24 +121,21 @@ int LCBootstrapMain(NSString *executablePath,
         return 1;
     }
     
-    /* insert the libraries before everything else */
-    LCInsertLibrariesIfNeeded();
-    
     /* preload executable to bypass RT_NOLOAD */
     char cdhash[USER_FSIGNATURES_CDHASH_LEN];
     int64_t ret = liveshim_syscall(SYS_pectl, kPECTLCategoryCodeSigning, kPECTLCodeSigningGetCDHash, cdhash, NULL, MACH_PORT_NULL);
     appMainImageIndex = _dyld_image_count();
     /* makes sure the binary gets loaded that is meant to have the ksurface capabilities */
-    void *appHandle = dlopenBypassingLockWithTrust(executablePath.fileSystemRepresentation, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST | RTLD_NODELETE, ret != 0 ? NULL : cdhash);
-    appExecutableHandle = appHandle;
-    if(!appHandle || (uint64_t)appHandle > 0xf00000000000)
+    void *guestHandle = dlopenBypassingLockWithTrust(executablePath.fileSystemRepresentation, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST | RTLD_NODELETE, ret != 0 ? NULL : cdhash);
+    appExecutableHandle = guestHandle;
+    if(!guestHandle || (uint64_t)guestHandle > 0xf00000000000)
     {
         printf("%s\n", dlerror());
         return 1;
     }
     
     /* find main */
-    int (*entry)(int, char**) = LCGetMachOEntryPoint(appHandle);
+    int (*entry)(int, char**) = PEGetMachOEntryPointOfHeader(guestHandle);
     assert(entry);
     
     /*

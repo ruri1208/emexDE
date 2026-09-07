@@ -20,24 +20,13 @@
  along with Nyxian. If not, see <https://www.gnu.org/licenses/>.
 */
 
-#ifndef TWEAKS_TWEAKS_H
-#define TWEAKS_TWEAKS_H
+#ifndef DYLD_HOOK_H
+#define DYLD_HOOK_H
 
-#include <LindChain/ProcEnvironment/LiveContainer/Tweaks/DyldHook.h>
+#include <stdint.h>
+#include <LiveShim/ptrcache.h>
 
-void NUDGuestHooksInit(void);
-void DyldHooksInit(void);
-void NSFMGuestHooksInit(void);
+bool performHookDyldApi(const char* functionName, uint32_t adrpOffset, void** origFunction, void* hookFunction);
+bool performHookDyldApiFast(int ptrcacheIndex, void** origFunction, void* hookFunction);
 
-@interface NSBundle(LiveContainer)
-- (instancetype)initWithPathForMainBundle:(NSString *)path;
-@end
-
-extern uint32_t appMainImageIndex;
-extern void* appExecutableHandle;
-extern bool tweakLoaderLoaded;
-void* dlopenBypassingLockWithTrust(const char *path, int mode, const char *cdhash);
-void initDead10ccFix(void);
-void UIKitGuestHooksInit(void);
-
-#endif /* TWEAKS_TWEAKS_H */
+#endif /* DYLD_HOOK_H */
